@@ -87,51 +87,34 @@ class ClassSpecificAugmentation:
             (split_path / "images").mkdir(parents=True, exist_ok=True)
             (split_path / "labels").mkdir(parents=True, exist_ok=True)
 
-    def get_augmentation_pipeline(self, aggressive=True):
+    def get_augmentation_pipeline(self):
         """
-        Augmentation pipeline oluştur (polygon-compatible)
-
-        Args:
-            aggressive: True ise daha agresif augmentation
+        Augmentation pipeline oluştur
         """
-        if aggressive:
-            # Train için agresif augmentation
-            return A.Compose(
-                [
-                    A.Rotate(limit=30, p=0.8),
-                    A.HorizontalFlip(p=0.5),
-                    A.VerticalFlip(p=0.5),
-                    A.RandomBrightnessContrast(
-                        brightness_limit=0.3, contrast_limit=0.3, p=0.8
-                    ),
-                    A.OneOf(
-                        [
-                            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-                            A.MedianBlur(blur_limit=5, p=1.0),
-                            A.MotionBlur(blur_limit=7, p=1.0),
-                        ],
-                        p=0.3,
-                    ),
-                    A.ElasticTransform(alpha=50, sigma=5, p=0.3),
-                    A.CLAHE(clip_limit=4.0, p=0.5),
-                    A.RandomGamma(gamma_limit=(80, 120), p=0.3),
-                    A.GaussNoise(p=0.3),
-                    A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=0.3),
-                ],
-                keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
-            )
-        else:
-            # Valid/Test için hafif augmentation
-            return A.Compose(
-                [
-                    A.Rotate(limit=10, p=0.5),
-                    A.HorizontalFlip(p=0.5),
-                    A.RandomBrightnessContrast(
-                        brightness_limit=0.1, contrast_limit=0.1, p=0.5
-                    ),
-                ],
-                keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
-            )
+        return A.Compose(
+            [
+                A.Rotate(limit=30, p=0.8),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.3, contrast_limit=0.3, p=0.8
+                ),
+                A.OneOf(
+                    [
+                        A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                        A.MedianBlur(blur_limit=5, p=1.0),
+                        A.MotionBlur(blur_limit=7, p=1.0),
+                    ],
+                    p=0.3,
+                ),
+                A.ElasticTransform(alpha=50, sigma=5, p=0.3),
+                A.CLAHE(clip_limit=4.0, p=0.5),
+                A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+                A.GaussNoise(p=0.3),
+                A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=0.3),
+            ],
+            keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
+        )
 
     def parse_polygon_label(self, label_line):
         """
@@ -320,7 +303,7 @@ class ClassSpecificAugmentation:
 
         print(f"  ✓ {split_name} dosyaları kopyalandı")
 
-    def augment_dataset(self, src_path, dst_path, split_name, augment_all=False):
+    def augment_dataset(self, src_path, dst_path, split_name):
         """
         Bir veri setini augment et
 
@@ -368,32 +351,58 @@ class ClassSpecificAugmentation:
                 f"  {class_name} (Class {class_id}): {count} görüntü ({percentage:.1f}%)"
             )
 
-        # Augmentation pipeline seç
-        if split_name == "train":
-            transform = self.get_augmentation_pipeline(aggressive=True)
-        else:
-            transform = self.get_augmentation_pipeline(aggressive=False)
+        transform = self.get_augmentation_pipeline()
 
         # Augmentation yap
         print(f"\n🔄 Augmentation başlıyor...")
         augmented_counts = defaultdict(int)
 
-        if augment_all:
-            # Valid/Test için: Tüm sınıfları hafifçe augment et
-            multiplier = 2
-            print(f"  Tüm sınıflar {multiplier}x çoğaltılacak")
+        for class_id in sorted(class_counts.keys()):
+            count = class_counts[class_id]
+            class_name = (
+                self.class_names[class_id]
+                if class_id < len(self.class_names)
+                else f"Class_{class_id}"
+            )
 
-            for img_file in tqdm(
-                list(src_images.glob("*.jpg"))
-                + list(src_images.glob("*.png"))
-                + list(src_images.glob("*.jpeg"))
-                + list(src_images.glob("*.bmp")),
-                desc=f"  {split_name}",
+            if count >= self.target_count:
+                print(f"  ✓ {class_name}: {count} görüntü (yeterli)")
+                continue
+
+            # Kaç kat çoğaltmak gerekiyor?
+            multiplier = max(2, (self.target_count // count) + 1)
+            needed = self.target_count - count
+
+            print(
+                f"  🎯 {class_name}: {count} → {min(count * multiplier, self.target_count)} görüntü ({multiplier}x)"
+            )
+
+            # Bu sınıfa ait görüntüleri augment et
+            class_image_list = class_images[class_id]
+            augmented = 0
+
+            for img_name in tqdm(
+                class_image_list, desc=f"    {class_name}", leave=False
             ):
-                label_file = src_labels / f"{img_file.stem}.txt"
+                # Görüntü dosyasını bul
+                img_file = None
+                for ext in [".jpg", ".png", ".jpeg", ".bmp"]:
+                    potential_path = src_images / f"{img_name}{ext}"
+                    if potential_path.exists():
+                        img_file = potential_path
+                        break
 
+                if img_file is None:
+                    continue
+
+                label_file = src_labels / f"{img_name}.txt"
+
+                # multiplier kadar augmented versiyon oluştur
                 for i in range(multiplier - 1):
-                    output_name = f"{img_file.stem}_aug{i+1}"
+                    if augmented >= needed:
+                        break
+
+                    output_name = f"{img_name}_aug{i+1}_c{class_id}"
                     success = self.augment_image(
                         img_file,
                         label_file,
@@ -402,71 +411,13 @@ class ClassSpecificAugmentation:
                         dst_labels,
                         output_name,
                     )
+
                     if success:
-                        augmented_counts["all"] += 1
-        else:
-            # Train için: Sadece az olan sınıfları çoğalt
-            for class_id in sorted(class_counts.keys()):
-                count = class_counts[class_id]
-                class_name = (
-                    self.class_names[class_id]
-                    if class_id < len(self.class_names)
-                    else f"Class_{class_id}"
-                )
+                        augmented += 1
+                        augmented_counts[class_id] += 1
 
-                if count >= self.target_count:
-                    print(f"  ✓ {class_name}: {count} görüntü (yeterli)")
-                    continue
-
-                # Kaç kat çoğaltmak gerekiyor?
-                multiplier = max(2, (self.target_count // count) + 1)
-                needed = self.target_count - count
-
-                print(
-                    f"  🎯 {class_name}: {count} → {min(count * multiplier, self.target_count)} görüntü ({multiplier}x)"
-                )
-
-                # Bu sınıfa ait görüntüleri augment et
-                class_image_list = class_images[class_id]
-                augmented = 0
-
-                for img_name in tqdm(
-                    class_image_list, desc=f"    {class_name}", leave=False
-                ):
-                    # Görüntü dosyasını bul
-                    img_file = None
-                    for ext in [".jpg", ".png", ".jpeg", ".bmp"]:
-                        potential_path = src_images / f"{img_name}{ext}"
-                        if potential_path.exists():
-                            img_file = potential_path
-                            break
-
-                    if img_file is None:
-                        continue
-
-                    label_file = src_labels / f"{img_name}.txt"
-
-                    # multiplier kadar augmented versiyon oluştur
-                    for i in range(multiplier - 1):
-                        if augmented >= needed:
-                            break
-
-                        output_name = f"{img_name}_aug{i+1}_c{class_id}"
-                        success = self.augment_image(
-                            img_file,
-                            label_file,
-                            transform,
-                            dst_images,
-                            dst_labels,
-                            output_name,
-                        )
-
-                        if success:
-                            augmented += 1
-                            augmented_counts[class_id] += 1
-
-                    if augmented >= needed:
-                        break
+                if augmented >= needed:
+                    break
 
         # Yeni dağılımı göster
         print(f"\n✅ Augmentation tamamlandı!")
@@ -510,14 +461,9 @@ class ClassSpecificAugmentation:
 
         print(f"\n✓ Yeni data.yaml oluşturuldu: {new_yaml_path}")
 
-    def run(self, augment_train=True, augment_valid=False, augment_test=False):
+    def run(self):
         """
         Tüm augmentation işlemini çalıştır
-
-        Args:
-            augment_train: Train setini augment et (class-specific)
-            augment_valid: Valid setini augment et (tüm sınıflar, hafif)
-            augment_test: Test setini augment et (tüm sınıflar, hafif)
         """
         print(f"\n{'='*60}")
         print(f"🚀 POLYGON SEGMENTATION AUGMENTATION")
@@ -535,34 +481,13 @@ class ClassSpecificAugmentation:
             print("İşlem iptal edildi.")
             return
 
-        # Train setini işle
-        if augment_train:
-            self.augment_dataset(
-                self.train_path, self.output_train, "train", augment_all=False
-            )
+        self.augment_dataset(
+            self.train_path, self.output_train, "train", augment_all=False
+        )
 
-        # Valid setini işle
-        if augment_valid:
-            self.augment_dataset(
-                self.val_path, self.output_val, "valid", augment_all=True
-            )
-        else:
-            # Sadece kopyala
-            self.copy_original_files(self.val_path, self.output_val, "valid")
+        self.copy_original_files(self.val_path, self.output_val, "valid")
 
-        # Test setini işle
-        if augment_test:
-            print("\n⚠ UYARI: Test setini augment etmek önerilmez!")
-            confirm = input("Devam etmek istediğinizden emin misiniz? (yes/no): ")
-            if confirm.lower() == "yes":
-                self.augment_dataset(
-                    self.test_path, self.output_test, "test", augment_all=True
-                )
-            else:
-                self.copy_original_files(self.test_path, self.output_test, "test")
-        else:
-            # Sadece kopyala
-            self.copy_original_files(self.test_path, self.output_test, "test")
+        self.copy_original_files(self.test_path, self.output_test, "test")
 
         # Yeni data.yaml oluştur
         self.create_new_yaml()
@@ -575,16 +500,12 @@ class ClassSpecificAugmentation:
 
 
 if __name__ == "__main__":
-    # Kullanım
+
     augmenter = ClassSpecificAugmentation(
-        data_yaml_path="data.yaml",  # Orijinal data.yaml yolu
-        output_folder_name="data/data_v2_aug",  # Yeni klasör adı
+        data_yaml_path="./data.yaml",  # Orijinal data.yaml yolu
+        output_folder_name="data_v2_aug",  # Yeni klasör adı
         target_count=200,  # Her sınıftan hedef görüntü sayısı
     )
 
     # Çalıştır
-    augmenter.run(
-        augment_train=True,  # Train setini augment et (class-specific)
-        augment_valid=False,  # Valid setini augment etme (önerilir)
-        augment_test=False,  # Test setini augment etme (kesinlikle önerilmez!)
-    )
+    augmenter.run()
